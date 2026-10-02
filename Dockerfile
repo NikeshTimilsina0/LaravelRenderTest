@@ -25,18 +25,38 @@ RUN composer dump-autoload --optimize
 # Stage 2: Final single-container production image
 FROM php:8.3-fpm-alpine
 
-RUN apk add --no-cache \
-    nginx supervisor curl libpng libjpeg-turbo freetype libzip icu-libs oniguruma
+# Install build dependencies temporarily in stage 2 to build PHP extensions
+RUN apk add --no-cache --virtual .build-deps \
+    freetype-dev \
+    libjpeg-turbo-dev \
+    libpng-dev \
+    libzip-dev \
+    icu-dev \
+    oniguruma-dev
 
+# Install runtime dependencies needed at execution time
+RUN apk add --no-cache \
+    nginx \
+    supervisor \
+    curl \
+    freetype \
+    libjpeg-turbo \
+    libpng \
+    libzip \
+    icu-libs \
+    oniguruma
+
+# Configure and install PHP extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install pdo_mysql mbstring gd zip bcmath intl opcache
+    && docker-php-ext-install -j$(nproc) pdo_mysql mbstring gd zip bcmath intl opcache \
+    && apk del .build-deps
 
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
 WORKDIR /var/www/html
 COPY --from=builder /app /var/www/html
 
-# 1. Inline Nginx Configuration
+# Inline Nginx Configuration
 RUN echo 'server {' > /etc/nginx/http.d/default.conf && \
     echo '    listen 80;' >> /etc/nginx/http.d/default.conf && \
     echo '    server_name _;' >> /etc/nginx/http.d/default.conf && \
@@ -55,7 +75,7 @@ RUN echo 'server {' > /etc/nginx/http.d/default.conf && \
     echo '    location ~ /\.(?!well-known).* { deny all; }' >> /etc/nginx/http.d/default.conf && \
     echo '}' >> /etc/nginx/http.d/default.conf
 
-# 2. Inline Supervisor Configuration
+# Inline Supervisor Configuration
 RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf && \
     echo 'nodaemon=true' >> /etc/supervisor/conf.d/supervisord.conf && \
     echo 'user=root' >> /etc/supervisor/conf.d/supervisord.conf && \
@@ -78,11 +98,10 @@ RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf && \
     echo 'stderr_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
     echo 'autorestart=true' >> /etc/supervisor/conf.d/supervisord.conf
 
-# 3. Permissions & Runtime Startup Command
+# Permissions
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
 EXPOSE 80
 
-# Execute artisan optimization inline right before booting Supervisor
 CMD ["/bin/sh", "-c", "php artisan config:cache && php artisan route:cache && php artisan view:cache && /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]
