@@ -1,13 +1,14 @@
 # Stage 1: Build assets and dependencies
 FROM php:8.3-cli-alpine AS builder
 
-# 1. Install system dependencies & build tools needed for PHP extensions
+# 1. Added python3, make, and g++ for Node native modules (esbuild/lightningcss)
 RUN apk add --no-cache \
     curl git unzip \
     libpng-dev libjpeg-turbo-dev freetype-dev \
-    libzip-dev icu-dev oniguruma-dev nodejs npm
+    libzip-dev icu-dev oniguruma-dev \
+    nodejs npm python3 make g++
 
-# 2. Configure and install PHP extensions FIRST (before running composer)
+# 2. Configure and install PHP extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j$(nproc) pdo_mysql mbstring gd zip bcmath intl opcache
 
@@ -16,17 +17,20 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 
-# 4. Copy composer configuration files
+# 4. Copy composer configuration files & install PHP dependencies
 COPY composer.json composer.lock ./
-
-# 5. Install Composer dependencies (now that PHP extensions are available)
 RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --ignore-platform-reqs
 
-# 6. Copy frontend files and build assets
-COPY package.json package-lock.json* vite.config.js* ./
-RUN if [ -f package.json ]; then npm ci && npm run build; fi
+# 5. Copy package files & build frontend assets robustly
+COPY package.json package-lock.json* vite.config.js* webpack.mix.js* ./
+COPY resources/ ./resources/
 
-# 7. Copy full application code & generate optimized autoloader
+RUN if [ -f package.json ]; then \
+        npm ci || npm install; \
+        npm run build; \
+    fi
+
+# 6. Copy full application code & generate optimized autoloader
 COPY . .
 RUN composer dump-autoload --optimize
 
