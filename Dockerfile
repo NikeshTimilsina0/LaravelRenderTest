@@ -32,8 +32,7 @@ RUN mkdir -p bootstrap/cache \
     && composer install --no-dev --optimize-autoloader --no-interaction --no-scripts
 
 # Build frontend assets, then remove node_modules
-RUN npm ci && npm run build && rm -rf node_modules
-
+RUN npm install && npm run build && rm -rf node_modules
 # SQLite database file + permissions
 RUN touch database/database.sqlite \
     && chown -R www-data:www-data storage bootstrap/cache database \
