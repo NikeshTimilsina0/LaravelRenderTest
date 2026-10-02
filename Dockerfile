@@ -1,83 +1,88 @@
-# Stage 1: Build assets and install composer dependencies
+# Stage 1: Build assets and dependencies
 FROM php:8.3-cli-alpine AS builder
 
-# Install system dependencies & PHP extension build dependencies
-RUN apk add --no-no-cache \
-    curl \
-    git \
-    unzip \
-    libpng-dev \
-    libjpeg-turbo-dev \
-    freetype-dev \
-    libzip-dev \
-    icu-dev \
-    oniguruma-dev \
-    nodejs \
-    npm
+RUN apk add --no-cache \
+    curl git unzip libpng-dev libjpeg-turbo-dev freetype-dev \
+    libzip-dev icu-dev oniguruma-dev nodejs npm
 
-# Install PHP extensions required by Laravel
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install pdo_mysql mbstring gd zip bcmath intl opcache
 
-# Install Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 
-# Copy dependency definition files first (leverage layer caching)
 COPY composer.json composer.lock ./
 RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
 
-# Copy package files and build frontend assets
 COPY package.json package-lock.json* vite.config.js* ./
 RUN if [ -f package.json ]; then npm ci && npm run build; fi
 
-# Copy full application code
 COPY . .
-
-# Autoload optimization
 RUN composer dump-autoload --optimize
 
 
-# Stage 2: Production runtime image
+# Stage 2: Final single-container production image
 FROM php:8.3-fpm-alpine
 
-# Install production system dependencies
 RUN apk add --no-cache \
-    nginx \
-    supervisor \
-    curl \
-    libpng \
-    libjpeg-turbo \
-    freetype \
-    libzip \
-    icu-libs \
-    oniguruma
+    nginx supervisor curl libpng libjpeg-turbo freetype libzip icu-libs oniguruma
 
-# Install PHP extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install pdo_mysql mbstring gd zip bcmath intl opcache
 
-# Configure PHP for production
 RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
 
 WORKDIR /var/www/html
-
-# Copy application and built assets from builder stage
 COPY --from=builder /app /var/www/html
 
-# Set directory permissions for Laravel
+# 1. Inline Nginx Configuration
+RUN echo 'server {' > /etc/nginx/http.d/default.conf && \
+    echo '    listen 80;' >> /etc/nginx/http.d/default.conf && \
+    echo '    server_name _;' >> /etc/nginx/http.d/default.conf && \
+    echo '    root /var/www/html/public;' >> /etc/nginx/http.d/default.conf && \
+    echo '    index index.php;' >> /etc/nginx/http.d/default.conf && \
+    echo '    charset utf-8;' >> /etc/nginx/http.d/default.conf && \
+    echo '    location / { try_files $uri $uri/ /index.php?$query_string; }' >> /etc/nginx/http.d/default.conf && \
+    echo '    location = /favicon.ico { access_log off; lognotfound off; }' >> /etc/nginx/http.d/default.conf && \
+    echo '    location = /robots.txt  { access_log off; lognotfound off; }' >> /etc/nginx/http.d/default.conf && \
+    echo '    error_page 404 /index.php;' >> /etc/nginx/http.d/default.conf && \
+    echo '    location ~ \.php$ {' >> /etc/nginx/http.d/default.conf && \
+    echo '        fastcgi_pass 127.0.0.1:9000;' >> /etc/nginx/http.d/default.conf && \
+    echo '        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;' >> /etc/nginx/http.d/default.conf && \
+    echo '        include fastcgi_params;' >> /etc/nginx/http.d/default.conf && \
+    echo '    }' >> /etc/nginx/http.d/default.conf && \
+    echo '    location ~ /\.(?!well-known).* { deny all; }' >> /etc/nginx/http.d/default.conf && \
+    echo '}' >> /etc/nginx/http.d/default.conf
+
+# 2. Inline Supervisor Configuration
+RUN echo '[supervisord]' > /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'nodaemon=true' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'user=root' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'logfile=/dev/stdout' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo '' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo '[program:php-fpm]' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'command=php-fpm -F' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stdout_logfile=/dev/stdout' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stdout_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stderr_logfile=/dev/stderr' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stderr_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'autorestart=true' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo '' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo '[program:nginx]' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'command=nginx -g "daemon off;"' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stdout_logfile=/dev/stdout' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stdout_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stderr_logfile=/dev/stderr' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'stderr_logfile_maxbytes=0' >> /etc/supervisor/conf.d/supervisord.conf && \
+    echo 'autorestart=true' >> /etc/supervisor/conf.d/supervisord.conf
+
+# 3. Permissions & Runtime Startup Command
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
     && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-# Copy Nginx and Supervisor configurations
-COPY docker/nginx.conf /etc/nginx/http.d/default.conf
-COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Expose Render's default port
 EXPOSE 80
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Execute artisan optimization inline right before booting Supervisor
+CMD ["/bin/sh", "-c", "php artisan config:cache && php artisan route:cache && php artisan view:cache && /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"]
